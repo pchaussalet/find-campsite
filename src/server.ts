@@ -1,9 +1,13 @@
 #!/usr/bin/env node
+import * as Koa from 'koa';
+import * as Router from 'koa-router';
 
 import { DateTime } from 'luxon';
-import { DateAndStatus, ICampground, ICampsite } from './types';
+import { DateAndStatus, ErrorSearchResult, ICampground, ICampsite, Result, ResultCampgrounds, ResultUnit, ValidSearchResult } from './types';
 import * as RecreationGov from './apis/recreation_gov/recreation_gov';
 import * as ReserveCA from './apis/reserve_ca/reserve_california';
+
+const PORT = 19090;
 
 function matchAvailableDateRanges(
   availabilities: DateAndStatus[],
@@ -78,66 +82,63 @@ function consolidateItineraries(
   return Object.values(result).sort((a, b) => a.range.start.diff(b.range.end).as('days'));
 }
 
-function formatRange(start: DateTime, end: DateTime) {
-  const startFmt = start.toLocaleString(DateTime.DATE_SHORT);
-  const endFmt = end.toLocaleString(DateTime.DATE_SHORT);
-  return `${startFmt} to ${endFmt}`;
-}
-
 interface ReservationAPI {
   getCampground(campgroundId: string): Promise<ICampground | null>;
   getCampsites(campgroundId: string, monthsToCheck: number): Promise<ICampsite[]>;
 }
 
-async function doTheThing(
-  api: ReservationAPI,
+async function search(
+  provider: APIChoice,
   campgroundId: string,
   startDayOfWeek: number,
   lengthOfStay: number,
   monthsToCheck: number,
-) {
+): Promise<Result> {
+  const api = pickAPI(provider);
   const campground = await api.getCampground(campgroundId);
 
   if (!campground) {
     throw new Error(`No campground with id ${campgroundId}`);
   }
 
-  console.log(
-    `Checking for sites at ${campground.getName()} available on a ${weekdayToDay(
-      startDayOfWeek,
-    )} for ${lengthOfStay} ${lengthOfStay === 1 ? 'night' : 'nights'}.`,
-  );
-  console.log();
-
-  const campsites = await api.getCampsites(campgroundId, monthsToCheck);
+  const campsites = await api.getCampsites(campgroundId, monthsToCheck) as any;
 
   const matches = campsites
-    .map((site) => {
+    .map((site: any) => {
       const availabilities = site.getAvailableDates();
       const matchingRanges = matchAvailableDateRanges(availabilities, startDayOfWeek, lengthOfStay);
 
       return { site, matchingRanges };
     })
-    .filter((site) => site.matchingRanges.length > 0);
+    .filter((site: any) => site.matchingRanges.length > 0);
 
   const regrouped = consolidateItineraries(matches);
 
+  const results: ResultCampgrounds = {};
+  const searchResult =  {
+    campgroundName: campground.getName(),
+    results
+  };
+
   if (regrouped.length > 0) {
-    const length = regrouped.length;
-    console.log(`Found ${length} matching ${length === 1 ? 'itinerary' : 'itineraries'}:`);
-    console.log();
     regrouped.forEach(({ range, campsites }) => {
-      const { start, end } = range;
-      const diff = Math.round(start.diffNow('week').as('weeks'));
-      console.log(`${formatRange(start, end)} (in ${diff} ${diff === 1 ? 'week' : 'weeks'}):`);
+      const units: ResultUnit[] = [];
+      const { start } = range;
 
       campsites.forEach((site) => {
-        console.log(`- ${site.getName()} ${site.getUrl()}`);
+        const unit: ResultUnit = {
+          name: site.getName()
+        };
+        if (provider !== APIChoice.ReserveCA) {
+          unit.url = site.getUrl();
+        }
+        units.push(unit);
       });
+      results[start.toISODate()] = units;
     });
-  } else {
-    console.log('No sites found for the given constraints :(');
   }
+
+  return searchResult;
 }
 
 enum APIChoice {
@@ -159,8 +160,8 @@ function pickAPI(choice: APIChoice) {
 
 async function main(argv: Argv) {
   try {
-    const api = pickAPI(argv.api);
-    await doTheThing(api, argv.campground, dayToWeekday(argv.day), argv.nights, argv.months);
+    const result = await search(argv.api, argv.campground, dayToWeekday(argv.day), argv.nights, argv.months);
+    console.log(JSON.stringify(result));
   } catch (e) {
     console.error(e.message);
     process.exit(1);
@@ -178,39 +179,45 @@ function weekdayToDay(weekday: number) {
 }
 
 if (require.main === module) {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { argv } = require('yargs')
-    .alias('h', 'help')
-    .option('api', {
-      type: 'string',
-      choices: ['recreation_gov', 'reserve_ca'],
-      default: 'recreation_gov',
-      description: 'Which reservation API to search',
-    })
-    .option('campground', {
-      alias: 'c',
-      type: 'number',
-      description: "Campground's identifier",
-      required: true,
-    })
-    .option('day', {
-      alias: 'd',
-      type: 'string',
-      choices: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
-      default: 'fri',
-      description: 'Day of week to start on',
-    })
-    .option('nights', {
-      alias: 'n',
-      type: 'number',
-      default: 2,
-    })
-    .option('months', {
-      alias: 'm',
-      type: 'number',
-      default: 6,
-      description: 'Number of months to check',
-    });
+  const app = new Koa();
+  const router = new Router();
 
-  main(argv);
+  router.get('/search', async (ctx, next) => {
+    let {
+      api,
+      campground,
+    } = ctx.query;
+    const weekday = parseInt(ctx.query.weekday as string);
+    const nights = parseInt(ctx.query.nights as string);
+    const months = parseInt(ctx.query.months as string);
+    const campgrounds = Array.isArray(campground) ? campground : [campground];
+    ctx.set('content-type', 'application.json');
+    const results = await Promise.all(
+      campgrounds.map(((campgroundId) => search(
+        api === APIChoice.ReserveCA ? APIChoice.ReserveCA : APIChoice.RecreationGov,
+        campgroundId as string,
+        weekday,
+        nights,
+        months
+      )))
+    );
+    const payload: ValidSearchResult = {
+      isError: false,
+      args: {
+        api: api as string,
+        campgrounds: campgrounds as string[],
+        lengthOfStay: nights,
+        monthsToCheck: months,
+        startDayOfWeek: weekday,
+      },
+      startDay: weekdayToDay(weekday),
+      results,
+    };
+    ctx.body = payload;
+    await next();
+  });
+
+  app.use(router.routes()).use(router.allowedMethods());
+
+  app.listen(PORT, () => console.log(`Server ready on port ${PORT}`));
 }
