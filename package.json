@@ -4,8 +4,7 @@
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },
-  "main": "dist/index.js",
-  "bin": "dist/index.js",
+  "main": "./dist/server.js",
   "license": "MIT",
   "files": [
     "dist/**/*",
@@ -39,6 +38,7 @@
     "ts:check": "tsc --noEmit",
     "lint:check": "eslint . --ext js,ts",
     "lint:fix": "eslint . --fix --ext js,ts",
-    "release": "release-it"
+    "release": "release-it",
+    "start": "./dist/server.js"
   }
 }
