@@ -32,12 +32,10 @@ class Campsite implements ICampsite {
   constructor(private data: API.Unit) {}
 
   getAvailableDates() {
-    return Object.entries(this.data.Slices).map(([date, value]) => {
-      return {
-        date: DateTime.fromISO(date),
-        isAvailable: value.IsFree,
-      };
-    });
+    return Object.entries(this.data.Slices).map(([date, value]) => ({
+      date: DateTime.fromISO(date),
+      isAvailable: value.IsFree,
+    }));
   }
 
   getName() {
@@ -49,12 +47,10 @@ class Campsite implements ICampsite {
   }
 }
 
-export async function getCampsites(
-  campgroundId: string,
-  monthsToCheck: number,
-): Promise<Campsite[]> {
+export async function getCampsites(campgroundId: string, monthsToCheck: number): Promise<Campsite[]> {
   const start = DateTime.local().startOf('day');
   const end = start.plus({ months: monthsToCheck });
+  console.log('===');
   return getCampsitesBetweenDates(campgroundId, start, end);
 }
 
@@ -62,7 +58,8 @@ async function getCampsitesBetweenDates(
   campgroundId: string,
   start: DateTime,
   end: DateTime,
-  results: Campsite[] = []
+  results: Campsite[] = [],
+  retries: number = 0
 ): Promise<Campsite[]> {
   const request = {
     FacilityId: campgroundId,
@@ -70,13 +67,20 @@ async function getCampsitesBetweenDates(
     EndDate: end.toFormat(API_DATE_FORMAT),
   };
   const response = await makePostRequest<API.GridResponse>(API_ENDPOINT, request);
-  results = [
-    ...results,
-    ...Object.values(response.data.Facility.Units).map((data) => new Campsite(data as API.Unit))];
-
-  const actualEndDate = DateTime.fromISO(response.data.EndDate);
-  if (actualEndDate < end) {
-    return getCampsitesBetweenDates(campgroundId, actualEndDate.plus({ days: 1 }), end, results);
+  console.log(request, response.data.Message, !!response.data.Facility, !!response.data.Facility.Units, retries);
+  if (response.data.Facility && response.data.Facility.Units) {
+    results = [
+      ...results,
+      ...Object.values(response.data.Facility.Units).map((data) => new Campsite(data as API.Unit))];
+  
+    const actualEndDate = DateTime.fromISO(response.data.EndDate);
+    if (actualEndDate < end) {
+      return getCampsitesBetweenDates(campgroundId, actualEndDate.plus({ days: 1 }), end, results, 0);
+    }
+    return results;
+  } else if (retries < 5) {
+    return getCampsitesBetweenDates(campgroundId, start, end, results, ++retries);
+  } else {
+    return results;
   }
-  return results;
 }
